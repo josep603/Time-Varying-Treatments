@@ -1,0 +1,353 @@
+---
+title: "Longitudinal Causal Inference with Time-Varying Treatments"
+author: "Bibin Joseph"
+format: pdf
+fontsize: 8pt
+editor: visual
+---
+
+## **Introduction**
+
+Many clinical studies involve time-varying treatments and confounders. Standard regression analyses can be biased in these settings if time-dependent confounders are both (i) influenced by prior treatment and (ii) predictive of subsequent treatment decisions. Two modern approaches to address this challenge are:
+
+1.  **G-Formula (G-Computation)**: Aims to emulate different hypothetical interventions by explicitly modeling the outcome and covariate processes over time.
+
+2.  **Inverse Probability Weighting (IPW)**: Reweights each observation according to the inverse of the probability of receiving the observed treatment at each time, thus constructing a pseudo-population in which treatment is effectively randomized.
+
+In this project, we apply both approaches to two different longitudinal datasets:
+
+1.  **HIV Data**: The outcome is a patient’s CD4 count (continuous) measured over multiple visits, with a binary treatment (antiretroviral therapy) updated at each visit. We use the G-Formula to estimate the “anticipated response” (average CD4 count at the end of follow-up) under several hypothetical treatment regimens.
+
+2.  **Primary Biliary Cirrhosis (PBC) Data**: The outcome is survival at 7 years. Treatment is liver transplantation, which can happen at any annual follow-up visit (up to 6 years). We estimate survival probabilities under hypothetical “transplant at year X” rules using IPW.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+library(tidyverse)
+library(gfoRmula)
+library(ipw)
+library(data.table)
+library(broom)
+library(knitr)
+
+
+hiv_data <- read.csv("hw7data_HIV_2024.csv", col.names = c("id", names(read.csv("hw7data_HIV_2024.csv"))[-1]))
+liv_data <- read.csv('hw7data_liver_2024.csv')
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+
+pivot_l <- function(df, names, val_name){
+  df %>% 
+    select(all_of(c("id", names))) %>% 
+    pivot_longer(cols = -id, 
+                 names_to =  "names", 
+                 values_to = val_name) %>% 
+    arrange(id, names) %>% 
+    group_by(id) %>% 
+    mutate(time = (1:n()) - 1) %>% 
+    ungroup() %>% 
+    select(-names)
+}
+
+all_long_parts <- list(
+  
+  pivot_l(df = hiv_data, 
+          names = c("CD40", "CD41", "CD42", "CD43", "CD44"), 
+          val_name = "CD"), 
+  pivot_l(df = hiv_data, 
+          names = c("A0", "A1", "A2", "A3"), 
+          val_name = "A"), 
+  
+  pivot_l(df = hiv_data, 
+          names = c("R0", "R1", "R2", "R3", "R4"), 
+          val_name = "R")
+)
+
+hiv_data_long <- all_long_parts %>% reduce( left_join, by = c("id","time")) %>% 
+  select(id, time, everything()) %>% 
+  group_by(id) %>% 
+  mutate(time_flag = case_when(time ==0 ~ 1, T ~ 0), 
+         baseline_CD = max(time_flag * CD),
+         Y = case_when(time == max(time) ~ CD,
+                        T ~ NA),
+         lag1_A = lag(A), 
+         lag1_R = lag(R)
+      ) %>% 
+  ungroup() %>% 
+  data.table() %>% 
+  rename(t0 = time)
+```
+
+### G-Formula Analysis on HIV Data
+
+The first component of this analysis focuses on the HIV dataset. We aim to use G-Computation to estimate the anticipated CD4 count under various predefined treatment patterns. In particular, we consider sequences of antiretroviral therapy decisions (binary) across five time intervals. The G-Formula allows us to calculate the expected (mean) final CD4 count (i.e., at the end of follow-up) under each specified regimen. Below is the code that implements this analysis.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+covparams <- 
+  list(covmodels = c(
+    A ~ lag1_A + R + lag1_R + baseline_CD + t0,
+    R ~ lag1_A + lag1_R + baseline_CD + t0)
+    )
+
+ymodel <- Y ~ R +  lag1_A + lag1_R + baseline_CD
+
+intvars <- list('A', 'A', "A", "A", "A")
+
+interventions <- list(list(c(static, c(0, 0, 0, 0, 0))),
+                      list(c(static, c(0, 0, 0, 1, 1))),
+                      list(c(static, c(0, 0, 1, 1, 1))),
+                      list(c(static, c(0, 1, 1, 1, 1))),
+                      list(c(static, c(1, 1, 1, 1, 1))))
+
+int_descript <- c('0,0,0,0,0,', 
+                  '0, 0, 0, 1, 1', 
+                  "0, 0, 1, 1, 1", 
+                  "0, 1, 1, 1, 1", 
+                  "1, 1, 1, 1, 1")
+
+res <- 
+  gformula(
+    obs_data = hiv_data_long,
+    id = 'id', 
+    time_name = 't0',
+    covnames = c('A', 'R'), 
+    outcome_name = 'Y',
+    outcome_type = 'continuous_eof', 
+    covtypes = c('binary', 'binary'),
+    histories = c(lagged), 
+    histvars = list(c('A', 'R')),
+    covparams = covparams, 
+    ymodel = ymodel,
+    intvars = intvars, 
+    interventions = interventions,
+    int_descript = int_descript,
+    basecovs = c("baseline_CD"),
+    nsimul = 10000,
+    nsamples = 10,
+    parallel = FALSE,
+    seed = 1234)
+```
+
+### Results for Hypothetical Treatment Sequences
+
+Using the gfoRmula package, implement the g-computation algorithm to estimate the anticipated response $$E (Y\overline{^a})$$ and standard error for the following treatment combinations. Note that the point estimates should be similar to what we obtained in class.
+
+i\) $\bar{a} = (0, 0, 0, 0)$
+
+ii\) $\bar{a} = (0, 0, 0, 1)$
+
+iii\) $\bar{a} = (0, 0, 1, 1)$
+
+iv\) $\bar{a} = (0, 1, 1,1 )$
+
+v\) $\bar{a} = (1, 1, 1, 1)$
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+table_results <- res$result %>% 
+  mutate(Treatment = c("NP", c('0, 0, 0, 0, 0 ', 
+                               '0, 0, 0, 1, 1',
+                               "0, 0, 1, 1, 1", 
+                               "0, 1, 1, 1, 1", 
+                               "1, 1, 1, 1, 1")
+                       )) %>% 
+  select(Treatment, `g-form mean`, `Mean SE`)
+# Round numerical columns to 4 decimal points
+table_results <- table_results %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# Generate a kable table
+kable(table_results, caption = "Anticipated Response Table", col.names = c("Treatment", "G-Formula Mean", "Mean SE"),align = "c")
+```
+
+## IPW Analysis on PBC Data
+
+We next turn to a study of patients with primary biliary cirrhosis (PBC), a rare autoimmune liver disease. In this dataset:
+
+-   Patients are followed annually for up to 7 visits (years 0 through 6).
+
+-   Covariates such as serum bilirubin, albumin, prothrombin time, and edema status are collected at each visit.
+
+-   A patient may undergo liver transplantation at any of these annual time points.
+
+-   Once a patient has died or received a transplant, subsequent data are accounted for accordingly (e.g., no further treatment decisions after death).
+
+Our main goal is to estimate 7-year survival under different “transplant at year X” rules. Specifically, we use IPW to approximate the counterfactual survival probability if all patients followed the same rule for transplant timing.
+
+### Propensity Score Model
+
+To construct our IPW estimators, we first fit a logistic regression model that describes the probability of transplant at each time given the individual’s observed covariates (and prior history).
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+w2 <- ipwtm(
+  exposure = transplanted,
+  family = "binomial",
+  link = "logit",
+  numerator = ~ 1,
+  
+  denominator = ~ year_round +
+    age + sex + edema + serBilir +
+    albumin + prothrombin,
+
+  id = id,
+  type = "first",
+  timevar = year_round,
+  data = liv_data
+)
+
+liv_data$ipw.weights <- w2$ipw.weights
+tidy_results <- w2$den.mod %>% tidy()
+
+# Round numeric columns to 4 decimal places
+tidy_results <- tidy_results %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+From the fitted model, we see that once a patient has died, they cannot be transplanted, so they no longer contribute to the model for transplant assignment.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+
+# Generate a kable table
+kable(tidy_results, caption = "Results of Denominator Model in IPW Analysis", digits = 4)
+```
+
+### Mean Response Estimation Under Different Transplant Regimes
+
+We consider eight possible strategies of the form: “Do not transplant for the first x years; if still alive at year x, then transplant.” Here, x can range from 0 through 6, plus the scenario of never transplanting. Once a patient dies, no further treatment decision is relevant for them.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+trt_regime_est <- function(df_raw = liv_data, x_years){
+    
+  df_in_function <- df_raw %>% 
+    
+    mutate(trt_rule = ifelse(year_round >= x_years, 1, 0),
+           compliance = ifelse(trt_rule == transplanted, 1, 0 )) 
+  
+  df_in_function.2 <- df_in_function %>% 
+    group_by(id) %>% 
+    summarise(m = min(compliance))
+  
+  df.2 <- merge(df_raw, df_in_function.2, by= "id")
+  df.3 <- df.2 %>% group_by(id) %>% slice_tail(n=1)
+  
+  with(df.3,
+    weighted.mean(transplanted,
+                  ipw.weights * m)
+  )
+}
+
+trt_year_options <- c(0:6)
+results <- sapply(trt_year_options, function(x) trt_regime_est(df_raw = liv_data, x_years = x))
+
+results <- round(results, 4) 
+# Create a data frame from the results
+results_df <- data.frame(Year = paste0("Transplant at year ", 0:6),
+                         Results = results)
+
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# Generate a kable table
+kable(results_df, col.names = c("Year", "Results"), caption = "Transplant Results by Year",row.names = FALSE,align = "c")
+```
+
+### Bootstrap Standard Errors
+
+Finally, we use a nonparametric bootstrap to estimate the standard errors of the IPW estimators. In each bootstrap sample, we resample entire clusters (i.e., all observations for a given patient) and recompute the estimates under each transplant timing scenario.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+
+B <- 100
+
+res <- matrix(rep(NA, B * length(trt_year_options)
+                  ), 
+              nrow = B, 
+              ncol = length(trt_year_options)
+              )
+
+set.seed(15578)
+for(i in 1:B){
+  
+ # print(i) #Print bootstrap
+  
+  ## again make sure we resample ids and get all correlated outcome within the same subject 
+  liv_data %>% select(id) %>% unique() %>% data.frame()-> ids
+  
+  ids2 <- ids[sample(1:nrow(ids), replace = T), ] %>% data.frame() %>% 
+    {colnames(.) = 'id'; .} %>% arrange(id) %>% 
+    group_by(id) %>% 
+    mutate(sec_id = 1:n()) %>% 
+    arrange(id, sec_id)
+  
+  frame_ <- rbind(ids2, ids2, ids2, ids2, ids2, ids2, ids2) %>% 
+    group_by(id, sec_id) %>% 
+    mutate(year_round = 1:n(), 
+           year_round = year_round - 1) %>% 
+    arrange(id, sec_id, year_round) %>% ungroup() %>% select(-sec_id)
+  
+  boot_df <- 
+    frame_ %>% 
+    inner_join(liv_data, by = c('id', 'year_round'))
+  
+  results_boot <- sapply(trt_year_options, function(x) trt_regime_est(df_raw = boot_df, x_years = x))
+  
+  res[i,] <- results_boot
+  
+}
+
+#write_rds(res, "q3c_boot.rds")
+
+#res <- read_rds("q3c_boot.rds")
+
+
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+se_res <- apply(res, 2, sd)
+
+# Create the data frame
+results_df <- data.frame(
+  trt_year = trt_year_options, 
+  estimate = results, 
+  se = se_res
+)
+
+# Round numeric values to 4 decimal points
+results_df <- results_df %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+
+# Generate the kable table
+kable(results_df, caption = "Treatment Year Results", col.names = c("Treatment Year", "Estimate", "Standard Error"),align = "c")
+```
+
+### Conclusion
+
+This study demonstrates the critical role of advanced causal inference techniques in addressing the challenges posed by time-varying treatments and confounders in longitudinal clinical data.
+
+**For the HIV dataset:**\
+Using the G-Formula (G-Computation), the analysis estimated the anticipated final CD4 count under different antiretroviral treatment regimens. The results indicate that:
+
+-   A no-treatment strategy (i.e., consistently not receiving treatment) is associated with the highest anticipated CD4 count.
+
+-   In contrast, regimens involving continuous or early treatment tend to yield lower anticipated CD4 counts.
+
+These findings suggest that the observed variations in CD4 counts across treatment regimes may be influenced by the clinical context in which treatments are administered, underscoring the importance of accounting for time-dependent confounding when interpreting treatment effects.
+
+**For the PBC dataset:**\
+The inverse probability weighting (IPW) approach was used to estimate 7-year survival probabilities under different liver transplantation strategies. Key observations include:
+
+-   Transplantation at baseline (year 0) results in a survival probability of 1.0000, with survival probabilities generally declining when transplantation is delayed.
+
+-   Notably, the survival estimates decrease markedly as the transplant is postponed—reaching a low around year 5—before a slight increase is observed at year 6.
+
+-   Bootstrap standard errors further support the reliability of these estimates.
+
+Together, these results emphasize that early intervention (i.e., timely transplantation) may improve survival outcomes among patients with primary biliary cirrhosis, while delayed treatment could be associated with poorer outcomes.
+
+**Overall Implications:**\
+Both analyses highlight that conventional regression methods might be inadequate when dealing with time-dependent confounding. By applying G-Formula and IPW, the study effectively emulates hypothetical interventions, offering a more nuanced understanding of how treatment timing impacts clinical outcomes. These insights can be instrumental in guiding clinical decision-making, optimizing treatment strategies, and ultimately improving patient care in dynamic healthcare settings.
